@@ -1,22 +1,25 @@
-use crate::utils::{compare_version, db_manager::get_settings, empty_dir, find_package_version, run_async_command, show_dialog_with_callback};
+use crate::DownloadState;
+use crate::downloading::{QueueJobPayload, queue::QueueJobKind};
+use crate::utils::{
+    compare_version, db_manager::get_settings, empty_dir, find_package_version, run_async_command,
+    show_dialog_with_callback,
+};
 use fischl::download::Extras;
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path,PathBuf};
-use tauri::{AppHandle, Runtime,Emitter,Manager};
-use crate::DownloadState;
-use crate::downloading::{QueueJobPayload, queue::{QueueJobKind}};
+use std::path::{Path, PathBuf};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 #[cfg(target_os = "linux")]
-use crate::downloading::queue::{QueueJobOutcome};
+use crate::downloading::queue::QueueJobOutcome;
 #[cfg(target_os = "linux")]
-use crate::downloading::{RunnerDownloadPayload,SteamrtDownloadPayload};
+use crate::downloading::{RunnerDownloadPayload, SteamrtDownloadPayload};
 #[cfg(target_os = "linux")]
 use crate::utils::db_manager::update_installed_runner_is_installed_by_version;
 #[cfg(target_os = "linux")]
 use fischl::compat::{download_runner, download_steamrt};
 #[cfg(target_os = "linux")]
-use std::sync::{Arc,Mutex};
+use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "linux")]
 pub fn download_or_update_steamrt3<R: Runtime>(app: &AppHandle<R>) {
@@ -24,20 +27,51 @@ pub fn download_or_update_steamrt3<R: Runtime>(app: &AppHandle<R>) {
     if let Some(s) = gs {
         let rp = Path::new(&s.default_runner_path);
         let steamrt = rp.join("steamrt").join("steamrt3");
-        if !steamrt.exists() { if let Err(e) = fs::create_dir_all(&steamrt) { let err = e.to_string(); show_dialog_with_callback(&app, "error", "TwintailLauncher", "dialogs.steamrt3_dir_prepare_failed", None, None, Some(std::collections::HashMap::from([("error", err.as_str())]))); return; } }
+        if !steamrt.exists() {
+            if let Err(e) = fs::create_dir_all(&steamrt) {
+                let err = e.to_string();
+                show_dialog_with_callback(
+                    &app,
+                    "error",
+                    "TwintailLauncher",
+                    "dialogs.steamrt3_dir_prepare_failed",
+                    None,
+                    None,
+                    Some(std::collections::HashMap::from([("error", err.as_str())])),
+                );
+                return;
+            }
+        }
         let steamrt_path = steamrt.to_str().unwrap().to_string();
-        let remote_version = match run_async_command(fischl::compat::get_steamrt_version("steamrt3".to_string(), "latest-public-beta".to_string())) { Some(v) => v, None => return };
+        let remote_version = match run_async_command(fischl::compat::get_steamrt_version(
+            "steamrt3".to_string(),
+            "latest-public-beta".to_string(),
+        )) {
+            Some(v) => v,
+            None => return,
+        };
 
         if fs::read_dir(&steamrt).unwrap().next().is_none() {
             // Fresh download - enqueue via queue system
             log::info!("Queuing SteamLinuxRuntime 3 download");
             let state = app.state::<DownloadState>();
             let q = state.queue.lock().unwrap().clone();
-            if let Some(queue) = q { queue.enqueue(QueueJobKind::SteamrtDownload, QueueJobPayload::Steamrt(SteamrtDownloadPayload { steamrt_path, version: remote_version, is_update: false })); }
+            if let Some(queue) = q {
+                queue.enqueue(
+                    QueueJobKind::SteamrtDownload,
+                    QueueJobPayload::Steamrt(SteamrtDownloadPayload {
+                        steamrt_path,
+                        version: remote_version,
+                        is_update: false,
+                    }),
+                );
+            }
         } else {
             // Check for updates
             let vp = steamrt.join("VERSIONS.txt");
-            if !vp.exists() { return; }
+            if !vp.exists() {
+                return;
+            }
             if fischl::utils::steamrt_up_to_date(steamrt.as_path(), &remote_version) == Some(true) {
                 log::info!("SteamLinuxRuntime 3 is up to date!");
                 #[cfg(debug_assertions)]
@@ -45,21 +79,41 @@ pub fn download_or_update_steamrt3<R: Runtime>(app: &AppHandle<R>) {
                 return;
             }
             log::info!("Queuing SteamLinuxRuntime 3 update");
-            empty_dir(steamrt.as_path()).unwrap();
             let state = app.state::<DownloadState>();
             let q = state.queue.lock().unwrap().clone();
-            if let Some(queue) = q { queue.enqueue(QueueJobKind::SteamrtDownload, QueueJobPayload::Steamrt(SteamrtDownloadPayload { steamrt_path, version: remote_version, is_update: true })); }
+            if let Some(queue) = q {
+                queue.enqueue(
+                    QueueJobKind::SteamrtDownload,
+                    QueueJobPayload::Steamrt(SteamrtDownloadPayload {
+                        steamrt_path,
+                        version: remote_version,
+                        is_update: true,
+                    }),
+                );
+            }
         }
     }
 }
 
 #[cfg(target_os = "linux")]
-pub fn run_steamrt3_download<R: Runtime>(app: AppHandle<R>, payload: SteamrtDownloadPayload, job_id: String) -> QueueJobOutcome {
+pub fn run_steamrt3_download<R: Runtime>(
+    app: AppHandle<R>,
+    payload: SteamrtDownloadPayload,
+    job_id: String,
+) -> QueueJobOutcome {
     let job_id = Arc::new(job_id);
     let dlpayload: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
     let steamrt_path = PathBuf::from(&payload.steamrt_path);
-    let event_name = if payload.is_update { "update_progress" } else { "download_progress" };
-    let complete_event = if payload.is_update { "update_complete" } else { "download_complete" };
+    let event_name = if payload.is_update {
+        "update_progress"
+    } else {
+        "download_progress"
+    };
+    let complete_event = if payload.is_update {
+        "update_complete"
+    } else {
+        "download_complete"
+    };
     {
         let mut dlp = dlpayload.lock().unwrap();
         dlp.insert("job_id".to_string(), job_id.to_string());
@@ -73,51 +127,94 @@ pub fn run_steamrt3_download<R: Runtime>(app: AppHandle<R>, payload: SteamrtDown
         app.emit(event_name, dlp.clone()).unwrap();
     }
 
-    log::debug!("Starting SteamLinuxRuntime 3 {} process", if payload.is_update { "update" } else { "download" });
+    log::debug!(
+        "Starting SteamLinuxRuntime 3 {} process",
+        if payload.is_update {
+            "update"
+        } else {
+            "download"
+        }
+    );
     let success = run_async_command(async {
-        download_steamrt(steamrt_path.clone(), steamrt_path.clone(), "steamrt3".to_string(), payload.version, {
-            let app = app.clone();
-            let dlpayload = dlpayload.clone();
-            let job_id = job_id.clone();
-            let event_name = event_name.to_string();
-            move |current, total, net_speed, disk_speed| {
-                let mut dlp = dlpayload.lock().unwrap();
-                dlp.insert("job_id".to_string(), job_id.to_string());
-                dlp.insert("name".to_string(), "SteamLinuxRuntime 3".to_string());
-                dlp.insert("progress".to_string(), current.to_string());
-                dlp.insert("total".to_string(), total.to_string());
-                dlp.insert("speed".to_string(), net_speed.to_string());
-                dlp.insert("disk".to_string(), disk_speed.to_string());
-                dlp.insert("install_progress".to_string(), "0".to_string());
-                dlp.insert("install_total".to_string(), "1000".to_string());
-                dlp.insert("phase".to_string(), "2".to_string()); // downloading phase
-                app.emit(&event_name, dlp.clone()).unwrap();
-            }
-        }, {
-            let app = app.clone();
-            let dlpayload = dlpayload.clone();
-            let job_id = job_id.clone();
-            let event_name = event_name.to_string();
-            move |current, total| {
-                let mut dlp = dlpayload.lock().unwrap();
-                dlp.insert("job_id".to_string(), job_id.to_string());
-                dlp.insert("name".to_string(), "SteamLinuxRuntime 3".to_string());
-                dlp.insert("install_progress".to_string(), current.to_string());
-                dlp.insert("install_total".to_string(), total.to_string());
-                dlp.insert("phase".to_string(), "3".to_string()); // installing phase
-                app.emit(&event_name, dlp.clone()).unwrap();
-            }
-        }).await
+        download_steamrt(
+            steamrt_path.clone(),
+            steamrt_path.clone(),
+            "steamrt3".to_string(),
+            payload.version,
+            {
+                let app = app.clone();
+                let dlpayload = dlpayload.clone();
+                let job_id = job_id.clone();
+                let event_name = event_name.to_string();
+                move |current, total, net_speed, disk_speed| {
+                    let mut dlp = dlpayload.lock().unwrap();
+                    dlp.insert("job_id".to_string(), job_id.to_string());
+                    dlp.insert("name".to_string(), "SteamLinuxRuntime 3".to_string());
+                    dlp.insert("progress".to_string(), current.to_string());
+                    dlp.insert("total".to_string(), total.to_string());
+                    dlp.insert("speed".to_string(), net_speed.to_string());
+                    dlp.insert("disk".to_string(), disk_speed.to_string());
+                    dlp.insert("install_progress".to_string(), "0".to_string());
+                    dlp.insert("install_total".to_string(), "1000".to_string());
+                    dlp.insert("phase".to_string(), "2".to_string()); // downloading phase
+                    app.emit(&event_name, dlp.clone()).unwrap();
+                }
+            },
+            {
+                let app = app.clone();
+                let dlpayload = dlpayload.clone();
+                let job_id = job_id.clone();
+                let event_name = event_name.to_string();
+                move |current, total| {
+                    let mut dlp = dlpayload.lock().unwrap();
+                    dlp.insert("job_id".to_string(), job_id.to_string());
+                    dlp.insert("name".to_string(), "SteamLinuxRuntime 3".to_string());
+                    dlp.insert("install_progress".to_string(), current.to_string());
+                    dlp.insert("install_total".to_string(), total.to_string());
+                    dlp.insert("phase".to_string(), "3".to_string()); // installing phase
+                    app.emit(&event_name, dlp.clone()).unwrap();
+                }
+            },
+        )
+        .await
     });
 
     if success {
-        app.emit(complete_event, String::from("SteamLinuxRuntime 3")).unwrap();
-        log::info!("Finished {} SteamLinuxRuntime 3", if payload.is_update { "updating" } else { "downloading" });
+        app.emit(complete_event, String::from("SteamLinuxRuntime 3"))
+            .unwrap();
+        log::info!(
+            "Finished {} SteamLinuxRuntime 3",
+            if payload.is_update {
+                "updating"
+            } else {
+                "downloading"
+            }
+        );
         QueueJobOutcome::Completed
     } else {
-        show_dialog_with_callback(&app, "error", "TwintailLauncher", if payload.is_update { "dialogs.steamrt3_update_error" } else { "dialogs.steamrt3_dl_error" }, Some(vec!["dialogs.buttons.ok"]), Some("dialog_steamrt3_dl_fail"), None);
-        app.emit(complete_event, String::from("SteamLinuxRuntime 3")).unwrap();
-        log::warn!("Failed to {} SteamLinuxRuntime 3", if payload.is_update { "update" } else { "download" });
+        show_dialog_with_callback(
+            &app,
+            "error",
+            "TwintailLauncher",
+            if payload.is_update {
+                "dialogs.steamrt3_update_error"
+            } else {
+                "dialogs.steamrt3_dl_error"
+            },
+            Some(vec!["dialogs.buttons.ok"]),
+            Some("dialog_steamrt3_dl_fail"),
+            None,
+        );
+        app.emit(complete_event, String::from("SteamLinuxRuntime 3"))
+            .unwrap();
+        log::warn!(
+            "Failed to {} SteamLinuxRuntime 3",
+            if payload.is_update {
+                "update"
+            } else {
+                "download"
+            }
+        );
         QueueJobOutcome::Failed
     }
 }
@@ -128,20 +225,51 @@ pub fn download_or_update_steamrt4<R: Runtime>(app: &AppHandle<R>) {
     if let Some(s) = gs {
         let rp = Path::new(&s.default_runner_path);
         let steamrt = rp.join("steamrt").join("steamrt4");
-        if !steamrt.exists() { if let Err(e) = fs::create_dir_all(&steamrt) { let err = e.to_string(); show_dialog_with_callback(&app, "error", "TwintailLauncher", "dialogs.steamrt4_dir_prepare_failed", None, None, Some(std::collections::HashMap::from([("error", err.as_str())]))); return; } }
+        if !steamrt.exists() {
+            if let Err(e) = fs::create_dir_all(&steamrt) {
+                let err = e.to_string();
+                show_dialog_with_callback(
+                    &app,
+                    "error",
+                    "TwintailLauncher",
+                    "dialogs.steamrt4_dir_prepare_failed",
+                    None,
+                    None,
+                    Some(std::collections::HashMap::from([("error", err.as_str())])),
+                );
+                return;
+            }
+        }
         let steamrt_path = steamrt.to_str().unwrap().to_string();
-        let remote_version = match run_async_command(fischl::compat::get_steamrt_version("steamrt4".to_string(), "latest-public-beta".to_string())) { Some(v) => v, None => return };
+        let remote_version = match run_async_command(fischl::compat::get_steamrt_version(
+            "steamrt4".to_string(),
+            "latest-public-beta".to_string(),
+        )) {
+            Some(v) => v,
+            None => return,
+        };
 
         if fs::read_dir(&steamrt).unwrap().next().is_none() {
             // Fresh download - enqueue via queue system
             log::info!("Queuing SteamLinuxRuntime 4 download");
             let state = app.state::<DownloadState>();
             let q = state.queue.lock().unwrap().clone();
-            if let Some(queue) = q { queue.enqueue(QueueJobKind::Steamrt4Download, QueueJobPayload::Steamrt4(SteamrtDownloadPayload { steamrt_path, version: remote_version, is_update: false })); }
+            if let Some(queue) = q {
+                queue.enqueue(
+                    QueueJobKind::Steamrt4Download,
+                    QueueJobPayload::Steamrt4(SteamrtDownloadPayload {
+                        steamrt_path,
+                        version: remote_version,
+                        is_update: false,
+                    }),
+                );
+            }
         } else {
             // Check for updates
             let vp = steamrt.join("VERSIONS.txt");
-            if !vp.exists() { return; }
+            if !vp.exists() {
+                return;
+            }
             if fischl::utils::steamrt_up_to_date(steamrt.as_path(), &remote_version) == Some(true) {
                 log::info!("SteamLinuxRuntime 4 is up to date!");
                 #[cfg(debug_assertions)]
@@ -149,21 +277,41 @@ pub fn download_or_update_steamrt4<R: Runtime>(app: &AppHandle<R>) {
                 return;
             }
             log::info!("Queuing SteamLinuxRuntime 4 update");
-            empty_dir(steamrt.as_path()).unwrap();
             let state = app.state::<DownloadState>();
             let q = state.queue.lock().unwrap().clone();
-            if let Some(queue) = q { queue.enqueue(QueueJobKind::Steamrt4Download, QueueJobPayload::Steamrt4(SteamrtDownloadPayload { steamrt_path, version: remote_version, is_update: true })); }
+            if let Some(queue) = q {
+                queue.enqueue(
+                    QueueJobKind::Steamrt4Download,
+                    QueueJobPayload::Steamrt4(SteamrtDownloadPayload {
+                        steamrt_path,
+                        version: remote_version,
+                        is_update: true,
+                    }),
+                );
+            }
         }
     }
 }
 
 #[cfg(target_os = "linux")]
-pub fn run_steamrt4_download<R: Runtime>(app: AppHandle<R>, payload: SteamrtDownloadPayload, job_id: String) -> QueueJobOutcome {
+pub fn run_steamrt4_download<R: Runtime>(
+    app: AppHandle<R>,
+    payload: SteamrtDownloadPayload,
+    job_id: String,
+) -> QueueJobOutcome {
     let job_id = Arc::new(job_id);
     let dlpayload: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
     let steamrt_path = PathBuf::from(&payload.steamrt_path);
-    let event_name = if payload.is_update { "update_progress" } else { "download_progress" };
-    let complete_event = if payload.is_update { "update_complete" } else { "download_complete" };
+    let event_name = if payload.is_update {
+        "update_progress"
+    } else {
+        "download_progress"
+    };
+    let complete_event = if payload.is_update {
+        "update_complete"
+    } else {
+        "download_complete"
+    };
     {
         let mut dlp = dlpayload.lock().unwrap();
         dlp.insert("job_id".to_string(), job_id.to_string());
@@ -177,57 +325,104 @@ pub fn run_steamrt4_download<R: Runtime>(app: AppHandle<R>, payload: SteamrtDown
         app.emit(event_name, dlp.clone()).unwrap();
     }
 
-    log::debug!("Starting SteamLinuxRuntime 4 {} process", if payload.is_update { "update" } else { "download" });
+    log::debug!(
+        "Starting SteamLinuxRuntime 4 {} process",
+        if payload.is_update {
+            "update"
+        } else {
+            "download"
+        }
+    );
     let success = run_async_command(async {
-        download_steamrt(steamrt_path.clone(), steamrt_path.clone(), "steamrt4".to_string(), payload.version, {
-            let app = app.clone();
-            let dlpayload = dlpayload.clone();
-            let job_id = job_id.clone();
-            let event_name = event_name.to_string();
-            move |current, total, net_speed, disk_speed| {
-                let mut dlp = dlpayload.lock().unwrap();
-                dlp.insert("job_id".to_string(), job_id.to_string());
-                dlp.insert("name".to_string(), "SteamLinuxRuntime 4".to_string());
-                dlp.insert("progress".to_string(), current.to_string());
-                dlp.insert("total".to_string(), total.to_string());
-                dlp.insert("speed".to_string(), net_speed.to_string());
-                dlp.insert("disk".to_string(), disk_speed.to_string());
-                dlp.insert("install_progress".to_string(), "0".to_string());
-                dlp.insert("install_total".to_string(), "1000".to_string());
-                dlp.insert("phase".to_string(), "2".to_string()); // downloading phase
-                app.emit(&event_name, dlp.clone()).unwrap();
-            }
-        }, {
-            let app = app.clone();
-            let dlpayload = dlpayload.clone();
-            let job_id = job_id.clone();
-            let event_name = event_name.to_string();
-            move |current, total| {
-                let mut dlp = dlpayload.lock().unwrap();
-                dlp.insert("job_id".to_string(), job_id.to_string());
-                dlp.insert("name".to_string(), "SteamLinuxRuntime 4".to_string());
-                dlp.insert("install_progress".to_string(), current.to_string());
-                dlp.insert("install_total".to_string(), total.to_string());
-                dlp.insert("phase".to_string(), "3".to_string()); // installing phase
-                app.emit(&event_name, dlp.clone()).unwrap();
-            }
-        }).await
+        download_steamrt(
+            steamrt_path.clone(),
+            steamrt_path.clone(),
+            "steamrt4".to_string(),
+            payload.version,
+            {
+                let app = app.clone();
+                let dlpayload = dlpayload.clone();
+                let job_id = job_id.clone();
+                let event_name = event_name.to_string();
+                move |current, total, net_speed, disk_speed| {
+                    let mut dlp = dlpayload.lock().unwrap();
+                    dlp.insert("job_id".to_string(), job_id.to_string());
+                    dlp.insert("name".to_string(), "SteamLinuxRuntime 4".to_string());
+                    dlp.insert("progress".to_string(), current.to_string());
+                    dlp.insert("total".to_string(), total.to_string());
+                    dlp.insert("speed".to_string(), net_speed.to_string());
+                    dlp.insert("disk".to_string(), disk_speed.to_string());
+                    dlp.insert("install_progress".to_string(), "0".to_string());
+                    dlp.insert("install_total".to_string(), "1000".to_string());
+                    dlp.insert("phase".to_string(), "2".to_string()); // downloading phase
+                    app.emit(&event_name, dlp.clone()).unwrap();
+                }
+            },
+            {
+                let app = app.clone();
+                let dlpayload = dlpayload.clone();
+                let job_id = job_id.clone();
+                let event_name = event_name.to_string();
+                move |current, total| {
+                    let mut dlp = dlpayload.lock().unwrap();
+                    dlp.insert("job_id".to_string(), job_id.to_string());
+                    dlp.insert("name".to_string(), "SteamLinuxRuntime 4".to_string());
+                    dlp.insert("install_progress".to_string(), current.to_string());
+                    dlp.insert("install_total".to_string(), total.to_string());
+                    dlp.insert("phase".to_string(), "3".to_string()); // installing phase
+                    app.emit(&event_name, dlp.clone()).unwrap();
+                }
+            },
+        )
+        .await
     });
 
     if success {
-        app.emit(complete_event, String::from("SteamLinuxRuntime 4")).unwrap();
-        log::info!("Finished {} SteamLinuxRuntime 4", if payload.is_update { "updating" } else { "downloading" });
+        app.emit(complete_event, String::from("SteamLinuxRuntime 4"))
+            .unwrap();
+        log::info!(
+            "Finished {} SteamLinuxRuntime 4",
+            if payload.is_update {
+                "updating"
+            } else {
+                "downloading"
+            }
+        );
         QueueJobOutcome::Completed
     } else {
-        show_dialog_with_callback(&app, "error", "TwintailLauncher", if payload.is_update { "dialogs.steamrt4_update_error" } else { "dialogs.steamrt4_dl_error" }, Some(vec!["dialogs.buttons.ok"]), Some("dialog_steamrt4_dl_fail"), None);
-        app.emit(complete_event, String::from("SteamLinuxRuntime 4")).unwrap();
-        log::warn!("Failed to {} SteamLinuxRuntime 4", if payload.is_update { "update" } else { "download" });
+        show_dialog_with_callback(
+            &app,
+            "error",
+            "TwintailLauncher",
+            if payload.is_update {
+                "dialogs.steamrt4_update_error"
+            } else {
+                "dialogs.steamrt4_dl_error"
+            },
+            Some(vec!["dialogs.buttons.ok"]),
+            Some("dialog_steamrt4_dl_fail"),
+            None,
+        );
+        app.emit(complete_event, String::from("SteamLinuxRuntime 4"))
+            .unwrap();
+        log::warn!(
+            "Failed to {} SteamLinuxRuntime 4",
+            if payload.is_update {
+                "update"
+            } else {
+                "download"
+            }
+        );
         QueueJobOutcome::Failed
     }
 }
 
 #[cfg(target_os = "linux")]
-pub fn run_runner_download<R: Runtime>(app: AppHandle<R>, payload: RunnerDownloadPayload, job_id: String) -> QueueJobOutcome {
+pub fn run_runner_download<R: Runtime>(
+    app: AppHandle<R>,
+    payload: RunnerDownloadPayload,
+    job_id: String,
+) -> QueueJobOutcome {
     let job_id = Arc::new(job_id);
     let dlpayload: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
     let runner_name = payload.runner_version.clone();
@@ -246,49 +441,70 @@ pub fn run_runner_download<R: Runtime>(app: AppHandle<R>, payload: RunnerDownloa
 
     log::debug!("Starting download process for runner {}", runner_name);
     let success = run_async_command(async {
-        download_runner(payload.runner_url.clone(), payload.runner_path.clone(), payload.runner_hash.clone(), true, {
-            let app = app.clone();
-            let dlpayload = dlpayload.clone();
-            let job_id = job_id.clone();
-            let runner_name = runner_name.clone();
-            move |current, total, net_speed, disk_speed| {
-                let mut dlp = dlpayload.lock().unwrap();
-                dlp.insert("job_id".to_string(), job_id.to_string());
-                dlp.insert("name".to_string(), runner_name.clone());
-                dlp.insert("progress".to_string(), current.to_string());
-                dlp.insert("total".to_string(), total.to_string());
-                dlp.insert("speed".to_string(), net_speed.to_string());
-                dlp.insert("disk".to_string(), disk_speed.to_string());
-                dlp.insert("install_progress".to_string(), "0".to_string());
-                dlp.insert("install_total".to_string(), "1000".to_string());
-                dlp.insert("phase".to_string(), "2".to_string()); // downloading phase
-                app.emit("download_progress", dlp.clone()).unwrap();
-            }
-        }, {
-            let app = app.clone();
-            let dlpayload = dlpayload.clone();
-            let job_id = job_id.clone();
-            let runner_name = runner_name.clone();
-            move |current, total| {
-                let mut dlp = dlpayload.lock().unwrap();
-                dlp.insert("job_id".to_string(), job_id.to_string());
-                dlp.insert("name".to_string(), runner_name.clone());
-                dlp.insert("install_progress".to_string(), current.to_string());
-                dlp.insert("install_total".to_string(), total.to_string());
-                dlp.insert("phase".to_string(), "3".to_string()); // installing phase
-                app.emit("download_progress", dlp.clone()).unwrap();
-            }
-        }).await
+        download_runner(
+            payload.runner_url.clone(),
+            payload.runner_path.clone(),
+            payload.runner_hash.clone(),
+            true,
+            {
+                let app = app.clone();
+                let dlpayload = dlpayload.clone();
+                let job_id = job_id.clone();
+                let runner_name = runner_name.clone();
+                move |current, total, net_speed, disk_speed| {
+                    let mut dlp = dlpayload.lock().unwrap();
+                    dlp.insert("job_id".to_string(), job_id.to_string());
+                    dlp.insert("name".to_string(), runner_name.clone());
+                    dlp.insert("progress".to_string(), current.to_string());
+                    dlp.insert("total".to_string(), total.to_string());
+                    dlp.insert("speed".to_string(), net_speed.to_string());
+                    dlp.insert("disk".to_string(), disk_speed.to_string());
+                    dlp.insert("install_progress".to_string(), "0".to_string());
+                    dlp.insert("install_total".to_string(), "1000".to_string());
+                    dlp.insert("phase".to_string(), "2".to_string()); // downloading phase
+                    app.emit("download_progress", dlp.clone()).unwrap();
+                }
+            },
+            {
+                let app = app.clone();
+                let dlpayload = dlpayload.clone();
+                let job_id = job_id.clone();
+                let runner_name = runner_name.clone();
+                move |current, total| {
+                    let mut dlp = dlpayload.lock().unwrap();
+                    dlp.insert("job_id".to_string(), job_id.to_string());
+                    dlp.insert("name".to_string(), runner_name.clone());
+                    dlp.insert("install_progress".to_string(), current.to_string());
+                    dlp.insert("install_total".to_string(), total.to_string());
+                    dlp.insert("phase".to_string(), "3".to_string()); // installing phase
+                    app.emit("download_progress", dlp.clone()).unwrap();
+                }
+            },
+        )
+        .await
     });
 
     if success {
         update_installed_runner_is_installed_by_version(&app, payload.runner_version.clone(), true);
-        app.emit("download_complete", payload.runner_version.clone()).unwrap();
+        app.emit("download_complete", payload.runner_version.clone())
+            .unwrap();
         log::info!("Finished downloading and extracting runner {}", runner_name);
         QueueJobOutcome::Completed
     } else {
-        show_dialog_with_callback(&app, "error", "TwintailLauncher", "dialogs.runner_download_error", Some(vec!["dialogs.buttons.ok"]), Some("dialog_runner_dl_fail"), Some(std::collections::HashMap::from([("runner_name", runner_name.as_str())])));
-        app.emit("download_complete", payload.runner_version.clone()).unwrap();
+        show_dialog_with_callback(
+            &app,
+            "error",
+            "TwintailLauncher",
+            "dialogs.runner_download_error",
+            Some(vec!["dialogs.buttons.ok"]),
+            Some("dialog_runner_dl_fail"),
+            Some(std::collections::HashMap::from([(
+                "runner_name",
+                runner_name.as_str(),
+            )])),
+        );
+        app.emit("download_complete", payload.runner_version.clone())
+            .unwrap();
         let _ = empty_dir(payload.runner_path.clone());
         log::warn!("Failed to download runner {}", runner_name);
         QueueJobOutcome::Failed
@@ -319,214 +535,626 @@ pub fn check_extras_update<R: Runtime>(app: &AppHandle<R>) {
 
         log::info!("Starting extras update check");
         if ver_fpsunlock.exists() {
-            download_or_update_extra(app, fpsunlock, "keqingunlock".to_string(), "keqing_unlock".to_string(), true, None);
-        } else if fpsunlock.exists() && fs::read_dir(&fpsunlock).ok().and_then(|mut d| d.next()).is_some() {
+            download_or_update_extra(
+                app,
+                fpsunlock,
+                "keqingunlock".to_string(),
+                "keqing_unlock".to_string(),
+                true,
+                None,
+            );
+        } else if fpsunlock.exists()
+            && fs::read_dir(&fpsunlock)
+                .ok()
+                .and_then(|mut d| d.next())
+                .is_some()
+        {
             empty_dir(&fpsunlock).unwrap();
-            download_or_update_extra(app, fpsunlock, "keqingunlock".to_string(), "keqing_unlock".to_string(), false, None);
+            download_or_update_extra(
+                app,
+                fpsunlock,
+                "keqingunlock".to_string(),
+                "keqing_unlock".to_string(),
+                false,
+                None,
+            );
         }
 
         if ver_xxmi.exists() {
-            download_or_update_extra(app, xxmi.clone(), "xxmi".to_string(), "xxmi".to_string(), true, None);
-        } else if xxmi.exists() && fs::read_dir(&xxmi).ok().and_then(|mut d| d.next()).is_some() {
+            download_or_update_extra(
+                app,
+                xxmi.clone(),
+                "xxmi".to_string(),
+                "xxmi".to_string(),
+                true,
+                None,
+            );
+        } else if xxmi.exists()
+            && fs::read_dir(&xxmi)
+                .ok()
+                .and_then(|mut d| d.next())
+                .is_some()
+        {
             empty_dir(&xxmi).unwrap();
-            download_or_update_extra(app, xxmi.clone(), "xxmi".to_string(), "xxmi".to_string(), false, None);
+            download_or_update_extra(
+                app,
+                xxmi.clone(),
+                "xxmi".to_string(),
+                "xxmi".to_string(),
+                false,
+                None,
+            );
         }
 
         if ver_gimi.exists() {
-            download_or_update_extra(app, xxmi.clone(), "xxmi".to_string(), "gimi".to_string(), true, None);
-        } else if gimi.exists() && fs::read_dir(&gimi).ok().and_then(|mut d| d.next()).is_some() {
+            download_or_update_extra(
+                app,
+                xxmi.clone(),
+                "xxmi".to_string(),
+                "gimi".to_string(),
+                true,
+                None,
+            );
+        } else if gimi.exists()
+            && fs::read_dir(&gimi)
+                .ok()
+                .and_then(|mut d| d.next())
+                .is_some()
+        {
             empty_dir(&gimi).unwrap();
-            download_or_update_extra(app, xxmi.clone(), "xxmi".to_string(), "gimi".to_string(), false, None);
+            download_or_update_extra(
+                app,
+                xxmi.clone(),
+                "xxmi".to_string(),
+                "gimi".to_string(),
+                false,
+                None,
+            );
         }
 
         if ver_srmi.exists() {
-            download_or_update_extra(app, xxmi.clone(), "xxmi".to_string(), "srmi".to_string(), true, None);
-        } else if srmi.exists() && fs::read_dir(&srmi).ok().and_then(|mut d| d.next()).is_some() {
+            download_or_update_extra(
+                app,
+                xxmi.clone(),
+                "xxmi".to_string(),
+                "srmi".to_string(),
+                true,
+                None,
+            );
+        } else if srmi.exists()
+            && fs::read_dir(&srmi)
+                .ok()
+                .and_then(|mut d| d.next())
+                .is_some()
+        {
             empty_dir(&srmi).unwrap();
-            download_or_update_extra(app, xxmi.clone(), "xxmi".to_string(), "srmi".to_string(), false, None);
+            download_or_update_extra(
+                app,
+                xxmi.clone(),
+                "xxmi".to_string(),
+                "srmi".to_string(),
+                false,
+                None,
+            );
         }
 
         if ver_zzmi.exists() {
-            download_or_update_extra(app, xxmi.clone(), "xxmi".to_string(), "zzmi".to_string(), true, None);
-        } else if zzmi.exists() && fs::read_dir(&zzmi).ok().and_then(|mut d| d.next()).is_some() {
+            download_or_update_extra(
+                app,
+                xxmi.clone(),
+                "xxmi".to_string(),
+                "zzmi".to_string(),
+                true,
+                None,
+            );
+        } else if zzmi.exists()
+            && fs::read_dir(&zzmi)
+                .ok()
+                .and_then(|mut d| d.next())
+                .is_some()
+        {
             empty_dir(&zzmi).unwrap();
-            download_or_update_extra(app, xxmi.clone(), "xxmi".to_string(), "zzmi".to_string(), false, None);
+            download_or_update_extra(
+                app,
+                xxmi.clone(),
+                "xxmi".to_string(),
+                "zzmi".to_string(),
+                false,
+                None,
+            );
         }
 
         if ver_himi.exists() {
-            download_or_update_extra(app, xxmi.clone(), "xxmi".to_string(), "himi".to_string(), true, None);
-        } else if himi.exists() && fs::read_dir(&himi).ok().and_then(|mut d| d.next()).is_some() {
+            download_or_update_extra(
+                app,
+                xxmi.clone(),
+                "xxmi".to_string(),
+                "himi".to_string(),
+                true,
+                None,
+            );
+        } else if himi.exists()
+            && fs::read_dir(&himi)
+                .ok()
+                .and_then(|mut d| d.next())
+                .is_some()
+        {
             empty_dir(&himi).unwrap();
-            download_or_update_extra(app, xxmi.clone(), "xxmi".to_string(), "himi".to_string(), false, None);
+            download_or_update_extra(
+                app,
+                xxmi.clone(),
+                "xxmi".to_string(),
+                "himi".to_string(),
+                false,
+                None,
+            );
         }
 
         if ver_wwmi.exists() {
-            download_or_update_extra(app, xxmi.clone(), "xxmi".to_string(), "wwmi".to_string(), true, None);
-        } else if wwmi.exists() && fs::read_dir(&wwmi).ok().and_then(|mut d| d.next()).is_some() {
+            download_or_update_extra(
+                app,
+                xxmi.clone(),
+                "xxmi".to_string(),
+                "wwmi".to_string(),
+                true,
+                None,
+            );
+        } else if wwmi.exists()
+            && fs::read_dir(&wwmi)
+                .ok()
+                .and_then(|mut d| d.next())
+                .is_some()
+        {
             empty_dir(&wwmi).unwrap();
-            download_or_update_extra(app, xxmi.clone(), "xxmi".to_string(), "wwmi".to_string(), false, None);
+            download_or_update_extra(
+                app,
+                xxmi.clone(),
+                "xxmi".to_string(),
+                "wwmi".to_string(),
+                false,
+                None,
+            );
         }
 
         if ver_efmi.exists() {
-            download_or_update_extra(app, xxmi.clone(), "xxmi".to_string(), "efmi".to_string(), true, None);
-        } else if efmi.exists() && fs::read_dir(&efmi).ok().and_then(|mut d| d.next()).is_some() {
+            download_or_update_extra(
+                app,
+                xxmi.clone(),
+                "xxmi".to_string(),
+                "efmi".to_string(),
+                true,
+                None,
+            );
+        } else if efmi.exists()
+            && fs::read_dir(&efmi)
+                .ok()
+                .and_then(|mut d| d.next())
+                .is_some()
+        {
             empty_dir(&efmi).unwrap();
-            download_or_update_extra(app, xxmi.clone(), "xxmi".to_string(), "efmi".to_string(), false, None);
+            download_or_update_extra(
+                app,
+                xxmi.clone(),
+                "xxmi".to_string(),
+                "efmi".to_string(),
+                false,
+                None,
+            );
         }
         log::info!("Completed extras update check");
     }
 }
 
-pub fn download_or_update_extra<R: Runtime>(app: &AppHandle<R>, path: PathBuf, package_id: String, package_type: String, update_mode: bool, job_id: Option<String>) -> bool {
+pub fn download_or_update_extra<R: Runtime>(
+    app: &AppHandle<R>,
+    path: PathBuf,
+    package_id: String,
+    package_type: String,
+    update_mode: bool,
+    job_id: Option<String>,
+) -> bool {
     if job_id.is_none() {
         if !update_mode {
             let state = app.state::<DownloadState>();
             let q = state.queue.lock().unwrap().clone();
-            if let Some(queue) = q { if !queue.has_job_for_id(package_type.clone()) { log::info!("Queuing {} ({}) for download", package_id, package_type); queue.enqueue(QueueJobKind::ExtrasDownload, QueueJobPayload::Extras(crate::downloading::ExtrasDownloadPayload { path: path.to_str().unwrap().to_string(), package_id, package_type, update_mode: false })); } }
+            if let Some(queue) = q {
+                if !queue.has_job_for_id(package_type.clone()) {
+                    log::info!("Queuing {} ({}) for download", package_id, package_type);
+                    queue.enqueue(
+                        QueueJobKind::ExtrasDownload,
+                        QueueJobPayload::Extras(crate::downloading::ExtrasDownloadPayload {
+                            path: path.to_str().unwrap().to_string(),
+                            package_id,
+                            package_type,
+                            update_mode: false,
+                        }),
+                    );
+                }
+            }
         } else {
             let app = app.clone();
             let path = path.clone();
-            std::thread::spawn(move || { download_or_update_extra(&app, path, package_id, package_type, true, Some(String::new())); }); }
+            std::thread::spawn(move || {
+                download_or_update_extra(
+                    &app,
+                    path,
+                    package_id,
+                    package_type,
+                    true,
+                    Some(String::new()),
+                );
+            });
+        }
         return true;
     }
     let app = app.clone();
     if update_mode {
         if fs::read_dir(&path).unwrap().next().is_some() {
-                let manifest = Extras::fetch_ttl_manifest(package_id.clone());
-                if let Some(m) = manifest {
-                    if m.retcode != 0 {
-                        show_dialog_with_callback(&app, "error", "TwintailLauncher", "dialogs.package_update_error", Some(vec!["dialogs.buttons.ok"]), Some("dialog_extra_dl_fail"), Some(std::collections::HashMap::from([("package_id", package_id.as_str())])));
-                        app.emit("update_complete", package_id.clone()).unwrap();
-                        log::debug!("Failed to fetch TTL manifest for {package_id} during update check");
-                        return false;
+            let manifest = Extras::fetch_ttl_manifest(package_id.clone());
+            if let Some(m) = manifest {
+                if m.retcode != 0 {
+                    show_dialog_with_callback(
+                        &app,
+                        "error",
+                        "TwintailLauncher",
+                        "dialogs.package_update_error",
+                        Some(vec!["dialogs.buttons.ok"]),
+                        Some("dialog_extra_dl_fail"),
+                        Some(std::collections::HashMap::from([(
+                            "package_id",
+                            package_id.as_str(),
+                        )])),
+                    );
+                    app.emit("update_complete", package_id.clone()).unwrap();
+                    log::debug!(
+                        "Failed to fetch TTL manifest for {package_id} during update check"
+                    );
+                    return false;
+                } else {
+                    let ap = if package_type.as_str() == "xxmi" || package_id == "keqingunlock" {
+                        path.clone()
                     } else {
-                        let ap = if package_type.as_str() == "xxmi" || package_id == "keqingunlock" { path.clone() } else { path.join(&package_type) };
-                        let ver_path = if package_id == "keqingunlock" || package_type == "xxmi" { path.join("VERSION.txt") } else { path.join(package_type.clone()).join("VERSION.txt") };
-                        if !ver_path.exists() { return false; }
-                        let pkg_type = if package_id == "keqingunlock" { package_id.as_str() } else { package_type.as_str() };
-                        let local_ver = find_package_version(ver_path.clone(), &pkg_type);
-                        if local_ver.is_some() {
-                            let lv = local_ver.unwrap();
-                            let pkgs = m.data.unwrap();
-                            let pkg = pkgs.packages.iter().find(|e| e.package_name.to_ascii_lowercase().contains(package_type.as_str()));
-                            if let Some(p) = pkg {
-                                if compare_version(lv.as_str(), p.version.as_str()).is_lt() {
-                                    if job_id.as_ref().unwrap().is_empty() {
-                                        let state = app.state::<DownloadState>();
-                                        let q = state.queue.lock().unwrap().clone();
-                                        if let Some(queue) = q {
-                                            if !queue.has_job_for_id(package_type.clone()) { queue.enqueue(QueueJobKind::ExtrasDownload, QueueJobPayload::Extras(crate::downloading::ExtrasDownloadPayload { path: path.to_str().unwrap().to_string(), package_id: package_id.clone(), package_type: package_type.clone(), update_mode: true })); }
+                        path.join(&package_type)
+                    };
+                    let ver_path = if package_id == "keqingunlock" || package_type == "xxmi" {
+                        path.join("VERSION.txt")
+                    } else {
+                        path.join(package_type.clone()).join("VERSION.txt")
+                    };
+                    if !ver_path.exists() {
+                        return false;
+                    }
+                    let pkg_type = if package_id == "keqingunlock" {
+                        package_id.as_str()
+                    } else {
+                        package_type.as_str()
+                    };
+                    let local_ver = find_package_version(ver_path.clone(), &pkg_type);
+                    if local_ver.is_some() {
+                        let lv = local_ver.unwrap();
+                        let pkgs = m.data.unwrap();
+                        let pkg = pkgs.packages.iter().find(|e| {
+                            e.package_name
+                                .to_ascii_lowercase()
+                                .contains(package_type.as_str())
+                        });
+                        if let Some(p) = pkg {
+                            if compare_version(lv.as_str(), p.version.as_str()).is_lt() {
+                                if job_id.as_ref().unwrap().is_empty() {
+                                    let state = app.state::<DownloadState>();
+                                    let q = state.queue.lock().unwrap().clone();
+                                    if let Some(queue) = q {
+                                        if !queue.has_job_for_id(package_type.clone()) {
+                                            queue.enqueue(
+                                                QueueJobKind::ExtrasDownload,
+                                                QueueJobPayload::Extras(
+                                                    crate::downloading::ExtrasDownloadPayload {
+                                                        path: path.to_str().unwrap().to_string(),
+                                                        package_id: package_id.clone(),
+                                                        package_type: package_type.clone(),
+                                                        update_mode: true,
+                                                    },
+                                                ),
+                                            );
                                         }
-                                        return true;
                                     }
-                                    if package_type == "xxmi" {
-                                        for file in &p.file_list {
-                                            let f_path = path.join(file);
-                                            if f_path.exists() { let _ = fs::remove_file(f_path); }
+                                    return true;
+                                }
+                                if package_type == "xxmi" {
+                                    for file in &p.file_list {
+                                        let f_path = path.join(file);
+                                        if f_path.exists() {
+                                            let _ = fs::remove_file(f_path);
                                         }
-                                    } else { empty_dir(&ap).unwrap(); }
-                                    let dl = run_async_command(async {
-                                        let needs_extract = if package_type.as_str() == "keqing_unlock" || package_type.as_str() == "xxmi" { false } else { true };
-                                        let needs_append = if package_type.as_str() == "gimi" || package_type.as_str() == "srmi" || package_type.as_str() == "zzmi" || package_type.as_str() == "himi" || package_type.as_str() == "wwmi" || package_type.as_str() == "ssmi" || package_type.as_str() == "efmi" { true } else { false };
-                                        Extras::download_extra_package(package_id.clone(), package_type.clone(), needs_extract, false, needs_append, ap.as_path().to_str().unwrap().parse().unwrap(), |_current, _total| {}).await
-                                    });
-                                    if dl {
-                                        let mi_variants = if package_type == "xxmi" { vec!["gimi", "srmi", "zzmi", "wwmi", "himi", "efmi"] } else if package_type.as_str() == "gimi" || package_type.as_str() == "srmi" || package_type.as_str() == "zzmi" || package_type.as_str() == "himi" || package_type.as_str() == "wwmi" || package_type.as_str() == "ssmi" || package_type.as_str() == "efmi" { vec![package_type.as_str()] } else { vec![] };
-                                        for mi in mi_variants {
-                                            // Do not touch variants the user does not have installed, creating their dirs makes them look installed
-                                            if !path.join(mi).exists() { continue; }
-                                            for lib in ["d3d11.dll", "d3dcompiler_47.dll"] {
-                                                let linkedpath = path.join(mi).join(lib);
-                                                let _ = fs::remove_file(&linkedpath);
-                                                let source_lib = path.join(lib);
-                                                if !linkedpath.exists() && source_lib.exists() {
-                                                    #[cfg(target_os = "linux")]
-                                                    let _ = std::os::unix::fs::symlink(&source_lib, &linkedpath);
-                                                    #[cfg(target_os = "windows")]
-                                                    let _ = fs::copy(&source_lib, &linkedpath);
-                                                }
-                                            }
-                                            // FFS create empty Mods/ folder if its not extracted for a package... just why we cant package software properly
-                                            if !path.join(mi).join("Mods").exists() { let _ = fs::create_dir_all(path.join(mi).join("Mods")); }
-                                        }
-                                        app.emit("update_complete", package_id.clone()).unwrap();
-                                        log::debug!("Successfully updated {package_id} to version {}", p.version);
-                                        return true;
+                                    }
+                                } else {
+                                    empty_dir(&ap).unwrap();
+                                }
+                                let dl = run_async_command(async {
+                                    let needs_extract = if package_type.as_str() == "keqing_unlock"
+                                        || package_type.as_str() == "xxmi"
+                                    {
+                                        false
                                     } else {
-                                        show_dialog_with_callback(&app, "error", "TwintailLauncher", "dialogs.package_update_error", Some(vec!["dialogs.buttons.ok"]), Some("dialog_extra_dl_fail"), Some(std::collections::HashMap::from([("package_id", package_id.as_str())])));
-                                        app.emit("update_complete", package_id.clone()).unwrap();
-                                        empty_dir(&path).unwrap();
-                                        log::debug!("Failed to update {package_id} to version {}", p.version);
-                                        return false;
+                                        true
+                                    };
+                                    let needs_append = if package_type.as_str() == "gimi"
+                                        || package_type.as_str() == "srmi"
+                                        || package_type.as_str() == "zzmi"
+                                        || package_type.as_str() == "himi"
+                                        || package_type.as_str() == "wwmi"
+                                        || package_type.as_str() == "ssmi"
+                                        || package_type.as_str() == "efmi"
+                                    {
+                                        true
+                                    } else {
+                                        false
+                                    };
+                                    Extras::download_extra_package(
+                                        package_id.clone(),
+                                        package_type.clone(),
+                                        needs_extract,
+                                        false,
+                                        needs_append,
+                                        ap.as_path().to_str().unwrap().parse().unwrap(),
+                                        |_current, _total| {},
+                                    )
+                                    .await
+                                });
+                                if dl {
+                                    let mi_variants = if package_type == "xxmi" {
+                                        vec!["gimi", "srmi", "zzmi", "wwmi", "himi", "efmi"]
+                                    } else if package_type.as_str() == "gimi"
+                                        || package_type.as_str() == "srmi"
+                                        || package_type.as_str() == "zzmi"
+                                        || package_type.as_str() == "himi"
+                                        || package_type.as_str() == "wwmi"
+                                        || package_type.as_str() == "ssmi"
+                                        || package_type.as_str() == "efmi"
+                                    {
+                                        vec![package_type.as_str()]
+                                    } else {
+                                        vec![]
+                                    };
+                                    for mi in mi_variants {
+                                        // Do not touch variants the user does not have installed, creating their dirs makes them look installed
+                                        if !path.join(mi).exists() {
+                                            continue;
+                                        }
+                                        for lib in ["d3d11.dll", "d3dcompiler_47.dll"] {
+                                            let linkedpath = path.join(mi).join(lib);
+                                            let _ = fs::remove_file(&linkedpath);
+                                            let source_lib = path.join(lib);
+                                            if !linkedpath.exists() && source_lib.exists() {
+                                                #[cfg(target_os = "linux")]
+                                                let _ = std::os::unix::fs::symlink(
+                                                    &source_lib,
+                                                    &linkedpath,
+                                                );
+                                                #[cfg(target_os = "windows")]
+                                                let _ = fs::copy(&source_lib, &linkedpath);
+                                            }
+                                        }
+                                        // FFS create empty Mods/ folder if its not extracted for a package... just why we cant package software properly
+                                        if !path.join(mi).join("Mods").exists() {
+                                            let _ = fs::create_dir_all(path.join(mi).join("Mods"));
+                                        }
                                     }
+                                    app.emit("update_complete", package_id.clone()).unwrap();
+                                    log::debug!(
+                                        "Successfully updated {package_id} to version {}",
+                                        p.version
+                                    );
+                                    return true;
+                                } else {
+                                    show_dialog_with_callback(
+                                        &app,
+                                        "error",
+                                        "TwintailLauncher",
+                                        "dialogs.package_update_error",
+                                        Some(vec!["dialogs.buttons.ok"]),
+                                        Some("dialog_extra_dl_fail"),
+                                        Some(std::collections::HashMap::from([(
+                                            "package_id",
+                                            package_id.as_str(),
+                                        )])),
+                                    );
+                                    app.emit("update_complete", package_id.clone()).unwrap();
+                                    empty_dir(&path).unwrap();
+                                    log::debug!(
+                                        "Failed to update {package_id} to version {}",
+                                        p.version
+                                    );
+                                    return false;
                                 }
                             }
                         }
                     }
                 }
+            }
         }
         true // Nothing to update
     } else {
-        let ap = if package_type.as_str() == "gimi" || package_type.as_str() == "srmi" || package_type.as_str() == "zzmi" || package_type.as_str() == "himi" || package_type.as_str() == "wwmi" || package_type.as_str() == "ssmi" || package_type.as_str() == "efmi" { path.join(&package_type) } else { path.clone() };
-        let entries: Vec<_> = fs::read_dir(&ap).ok().map(|r| r.filter_map(|e| e.ok()).collect()).unwrap_or_default();
-        let is_effectively_empty = if package_type == "xxmi" { entries.iter().all(|e| { let name = e.file_name(); e.path().is_dir() && (name == "gimi" || name == "srmi" || name == "zzmi" || name == "himi" || name == "wwmi" || name == "ssmi" || name == "efmi") }) } else { entries.is_empty() || entries.iter().all(|e| e.file_name().to_str().unwrap().contains("Mods") || e.file_name().to_str().unwrap().contains("ShaderCache") || e.file_name() == "d3dx_user.ini" || e.file_name() == "d3d11.dll" || e.file_name() == "d3dcompiler_47.dll") };
+        let ap = if package_type.as_str() == "gimi"
+            || package_type.as_str() == "srmi"
+            || package_type.as_str() == "zzmi"
+            || package_type.as_str() == "himi"
+            || package_type.as_str() == "wwmi"
+            || package_type.as_str() == "ssmi"
+            || package_type.as_str() == "efmi"
+        {
+            path.join(&package_type)
+        } else {
+            path.clone()
+        };
+        let entries: Vec<_> = fs::read_dir(&ap)
+            .ok()
+            .map(|r| r.filter_map(|e| e.ok()).collect())
+            .unwrap_or_default();
+        let is_effectively_empty = if package_type == "xxmi" {
+            entries.iter().all(|e| {
+                let name = e.file_name();
+                e.path().is_dir()
+                    && (name == "gimi"
+                        || name == "srmi"
+                        || name == "zzmi"
+                        || name == "himi"
+                        || name == "wwmi"
+                        || name == "ssmi"
+                        || name == "efmi")
+            })
+        } else {
+            entries.is_empty()
+                || entries.iter().all(|e| {
+                    e.file_name().to_str().unwrap().contains("Mods")
+                        || e.file_name().to_str().unwrap().contains("ShaderCache")
+                        || e.file_name() == "d3dx_user.ini"
+                        || e.file_name() == "d3d11.dll"
+                        || e.file_name() == "d3dcompiler_47.dll"
+                })
+        };
         if is_effectively_empty {
-                let mut dlpayload = HashMap::new();
-                dlpayload.insert("name", package_id.clone().chars().next().map(|first| first.to_uppercase().collect::<String>() + &package_id[first.len_utf8()..]).unwrap_or_default());
-                dlpayload.insert("progress", "0".to_string());
-                dlpayload.insert("total", "1000".to_string());
-                if let Some(ref jid) = job_id { if !jid.is_empty() { dlpayload.insert("job_id", jid.clone()); } }
-                app.emit("download_progress", dlpayload.clone()).unwrap();
+            let mut dlpayload = HashMap::new();
+            dlpayload.insert(
+                "name",
+                package_id
+                    .clone()
+                    .chars()
+                    .next()
+                    .map(|first| {
+                        first.to_uppercase().collect::<String>() + &package_id[first.len_utf8()..]
+                    })
+                    .unwrap_or_default(),
+            );
+            dlpayload.insert("progress", "0".to_string());
+            dlpayload.insert("total", "1000".to_string());
+            if let Some(ref jid) = job_id {
+                if !jid.is_empty() {
+                    dlpayload.insert("job_id", jid.clone());
+                }
+            }
+            app.emit("download_progress", dlpayload.clone()).unwrap();
 
-                log::debug!("Starting download process for {package_id} ({package_type})");
-                if !ap.exists() { let _ = fs::create_dir_all(&ap); }
-                let dl = run_async_command(async {
-                    let needs_extract = if package_type.as_str() == "keqing_unlock" || package_type.as_str() == "xxmi" { false } else { true };
-                    let needs_append = if package_type.as_str() == "gimi" || package_type.as_str() == "srmi" || package_type.as_str() == "zzmi" || package_type.as_str() == "himi" || package_type.as_str() == "wwmi" || package_type.as_str() == "ssmi" || package_type.as_str() == "efmi" { true } else { false };
-                    Extras::download_extra_package(package_id.clone(), package_type.clone(), needs_extract, false, needs_append, ap.as_path().to_str().unwrap().parse().unwrap(), {
+            log::debug!("Starting download process for {package_id} ({package_type})");
+            if !ap.exists() {
+                let _ = fs::create_dir_all(&ap);
+            }
+            let dl = run_async_command(async {
+                let needs_extract = if package_type.as_str() == "keqing_unlock"
+                    || package_type.as_str() == "xxmi"
+                {
+                    false
+                } else {
+                    true
+                };
+                let needs_append = if package_type.as_str() == "gimi"
+                    || package_type.as_str() == "srmi"
+                    || package_type.as_str() == "zzmi"
+                    || package_type.as_str() == "himi"
+                    || package_type.as_str() == "wwmi"
+                    || package_type.as_str() == "ssmi"
+                    || package_type.as_str() == "efmi"
+                {
+                    true
+                } else {
+                    false
+                };
+                Extras::download_extra_package(
+                    package_id.clone(),
+                    package_type.clone(),
+                    needs_extract,
+                    false,
+                    needs_append,
+                    ap.as_path().to_str().unwrap().parse().unwrap(),
+                    {
                         let app = app.clone();
                         let pkg_id = package_id.clone();
                         let dlpayload = dlpayload.clone();
                         move |current, total| {
                             let mut dlpayload = dlpayload.clone();
-                            dlpayload.insert("name", pkg_id.clone().chars().next().map(|first| first.to_uppercase().collect::<String>() + &pkg_id[first.len_utf8()..]).unwrap_or_default());
+                            dlpayload.insert(
+                                "name",
+                                pkg_id
+                                    .clone()
+                                    .chars()
+                                    .next()
+                                    .map(|first| {
+                                        first.to_uppercase().collect::<String>()
+                                            + &pkg_id[first.len_utf8()..]
+                                    })
+                                    .unwrap_or_default(),
+                            );
                             dlpayload.insert("progress", current.to_string());
                             dlpayload.insert("total", total.to_string());
                             app.emit("download_progress", dlpayload.clone()).unwrap();
                         }
-                    }).await
-                });
-                if dl {
-                    let mi_variants = if package_type == "xxmi" { vec!["gimi", "srmi", "zzmi", "wwmi", "himi", "efmi"] } else if package_type.as_str() == "gimi" || package_type.as_str() == "srmi" || package_type.as_str() == "zzmi" || package_type.as_str() == "himi" || package_type.as_str() == "wwmi" || package_type.as_str() == "ssmi" || package_type.as_str() == "efmi" { vec![package_type.as_str()] } else { vec![] };
-                    for mi in mi_variants {
-                        // Do not touch variants the user does not have installed, creating their dirs makes them look installed
-                        if !path.join(mi).exists() { continue; }
-                        for lib in ["d3d11.dll", "d3dcompiler_47.dll"] {
-                            let linkedpath = path.join(mi).join(lib);
-                            let _ = fs::remove_file(&linkedpath);
-                            let source_lib = path.join(lib);
-                            if !linkedpath.exists() && source_lib.exists() {
-                                #[cfg(target_os = "linux")]
-                                let _ = std::os::unix::fs::symlink(&source_lib, &linkedpath);
-                                #[cfg(target_os = "windows")]
-                                let _ = fs::copy(&source_lib, &linkedpath);
-                            }
-                        }
-                        // FFS create empty Mods/ folder if its not extracted for a package... just why we cant package software properly
-                        if !path.join(mi).join("Mods").exists() { let _ = fs::create_dir_all(path.join(mi).join("Mods")); }
-                    }
-                    app.emit("download_complete", package_id.clone()).unwrap();
-                    log::debug!("Finished downloading {package_id}");
-                    return true;
+                    },
+                )
+                .await
+            });
+            if dl {
+                let mi_variants = if package_type == "xxmi" {
+                    vec!["gimi", "srmi", "zzmi", "wwmi", "himi", "efmi"]
+                } else if package_type.as_str() == "gimi"
+                    || package_type.as_str() == "srmi"
+                    || package_type.as_str() == "zzmi"
+                    || package_type.as_str() == "himi"
+                    || package_type.as_str() == "wwmi"
+                    || package_type.as_str() == "ssmi"
+                    || package_type.as_str() == "efmi"
+                {
+                    vec![package_type.as_str()]
                 } else {
-                    show_dialog_with_callback(&app, "error", "TwintailLauncher", "dialogs.package_download_error", Some(vec!["dialogs.buttons.ok"]), Some("dialog_extra_dl_fail"), Some(std::collections::HashMap::from([("package_id", package_id.as_str())])));
-                    app.emit("download_complete", package_id.clone()).unwrap();
-                    empty_dir(&path).unwrap();
-                    log::debug!("Failed downloading {package_id}");
-                    return false;
+                    vec![]
+                };
+                for mi in mi_variants {
+                    // Do not touch variants the user does not have installed, creating their dirs makes them look installed
+                    if !path.join(mi).exists() {
+                        continue;
+                    }
+                    for lib in ["d3d11.dll", "d3dcompiler_47.dll"] {
+                        let linkedpath = path.join(mi).join(lib);
+                        let _ = fs::remove_file(&linkedpath);
+                        let source_lib = path.join(lib);
+                        if !linkedpath.exists() && source_lib.exists() {
+                            #[cfg(target_os = "linux")]
+                            let _ = std::os::unix::fs::symlink(&source_lib, &linkedpath);
+                            #[cfg(target_os = "windows")]
+                            let _ = fs::copy(&source_lib, &linkedpath);
+                        }
+                    }
+                    // FFS create empty Mods/ folder if its not extracted for a package... just why we cant package software properly
+                    if !path.join(mi).join("Mods").exists() {
+                        let _ = fs::create_dir_all(path.join(mi).join("Mods"));
+                    }
                 }
+                app.emit("download_complete", package_id.clone()).unwrap();
+                log::debug!("Finished downloading {package_id}");
+                return true;
+            } else {
+                show_dialog_with_callback(
+                    &app,
+                    "error",
+                    "TwintailLauncher",
+                    "dialogs.package_download_error",
+                    Some(vec!["dialogs.buttons.ok"]),
+                    Some("dialog_extra_dl_fail"),
+                    Some(std::collections::HashMap::from([(
+                        "package_id",
+                        package_id.as_str(),
+                    )])),
+                );
+                app.emit("download_complete", package_id.clone()).unwrap();
+                empty_dir(&path).unwrap();
+                log::debug!("Failed downloading {package_id}");
+                return false;
+            }
         }
-        log::debug!("Skipping {} ({}) download, already present", package_id, package_type);
+        log::debug!(
+            "Skipping {} ({}) download, already present",
+            package_id,
+            package_type
+        );
         true // Already downloaded
     }
 }
